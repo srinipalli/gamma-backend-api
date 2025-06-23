@@ -1075,90 +1075,160 @@ async def get_combined_logs(limit: int = 50, environment: Optional[str] = None,
 async def get_app_logs(
     environment: Optional[str] = Query("All"),
     app_name: Optional[str] = Query("All"),
+    page: int = Query(1, ge=1),
+    limit: int = Query(10, ge=1, le=100),
     search: Optional[str] = Query(None),
-    level: Optional[str] = Query(None),
-    limit: int = Query(100),
-    page: int = Query(1)
+    level: Optional[str] = Query(None)
 ):
-    """Get application logs with proper debugging"""
+    """Get application logs with pagination and filtering"""
     try:
-        logger.info(f"DEBUG: App logs request - env: {environment}, app: {app_name}")
+        logger.info(f"Fetching app logs - Environment: {environment}, App: {app_name}, Page: {page}, Limit: {limit}")
         
-        # Build base query
+        # Use the app collection
+        app_col = db['app']
+        
+        # Build query for app logs
         base_query = {}
         
         # Environment filter
         if environment and environment != "All":
             env_mapping = {
                 "Development": "Dev",
-                "Staging": "Stage",
+                "Staging": "Stage", 
                 "Production": "Prod",
                 "QA": "QA"
             }
             db_env = env_mapping.get(environment, environment)
             base_query['environment'] = db_env
-            logger.info(f"DEBUG: Environment filter applied: {db_env}")
         
-        # Application filter
+        # App filter
         if app_name and app_name != "All":
             base_query['app_name'] = app_name
-            logger.info(f"DEBUG: App filter applied: {app_name}")
         
-        # Add search filter
+        # Search filter
         if search:
             base_query['$or'] = [
                 {'message': {'$regex': search, '$options': 'i'}},
                 {'logger': {'$regex': search, '$options': 'i'}}
             ]
         
-        # Add level filter
+        # Level filter
         if level and level != "ALL":
             base_query['level'] = level
         
-        logger.info(f"DEBUG: Final query: {base_query}")
+        logger.info(f"App logs query: {base_query}")
         
-        # Check total documents in collection
-        total_docs = app_col.count_documents({})
-        logger.info(f"DEBUG: Total documents in app collection: {total_docs}")
+        # Get total count for pagination
+        total_count = app_col.count_documents(base_query)
         
-        # Check documents matching query
-        matching_docs = app_col.count_documents(base_query)
-        logger.info(f"DEBUG: Documents matching query: {matching_docs}")
-        
-        # Calculate skip for pagination
+        # Calculate pagination
         skip = (page - 1) * limit
+        total_pages = (total_count + limit - 1) // limit if total_count > 0 else 0
         
-        # Get logs with pagination
-        cursor = app_col.find(base_query).sort('createdAt', -1).skip(skip).limit(limit)
-        logs = list(cursor)
+        # Get paginated app logs
+        app_logs = list(
+            app_col.find(base_query)
+            .sort("createdAt", -1)
+            .skip(skip)
+            .limit(limit)
+        )
         
-        logger.info(f"DEBUG: Found {len(logs)} app logs")
+        logger.info(f"Retrieved {len(app_logs)} app logs (page {page} of {total_pages}, total: {total_count})")
         
-        # Sample a few logs for debugging
-        if logs:
-            logger.info(f"DEBUG: Sample log: {logs[0]}")
+        # Transform data to match frontend expectations
+        formatted_logs = []
+        for log in app_logs:
+            try:
+                formatted_log = {
+                    "_id": str(log.get("_id")),
+                    "timestamp": log.get("createdAt", datetime.utcnow()).isoformat(),
+                    "level": log.get("level", "INFO"),
+                    "message": log.get("message", ""),
+                    "logger": log.get("logger", "Unknown"),
+                    "environment": log.get("environment", "Unknown"),
+                    "server": log.get("server", "Unknown"),
+                    "app_name": log.get("app_name", "Unknown"),
+                    "path": log.get("path", ""),
+                    "exception_type": log.get("exception_type"),
+                    "exception_message": log.get("exception_message"),
+                    "stacktrace": log.get("stacktrace"),
+                    "createdAt": log.get("createdAt", datetime.utcnow()).isoformat()
+                }
+                formatted_logs.append(formatted_log)
+            except Exception as e:
+                logger.error(f"Error formatting app log {log.get('_id')}: {e}")
+                continue
         
-        # Map database environment back to frontend format
-        for log in logs:
-            db_env = log.get('environment', '')
-            env_mapping = {
-                "Dev": "Development",
-                "Stage": "Staging",
-                "Prod": "Production", 
-                "QA": "QA"
-            }
-            log['environment'] = env_mapping.get(db_env, db_env)
+        # Calculate statistics from ALL matching logs (not just current page)
+        all_matching_logs = list(app_col.find(base_query))
         
-        serialized_logs = serialize_docs(logs)
-        logger.info(f"DEBUG: Returning {len(serialized_logs)} serialized logs")
+        total_logs = len(all_matching_logs)
+        error_logs = len([log for log in all_matching_logs if log.get("level") == "ERROR"])
+        warning_logs = len([log for log in all_matching_logs if log.get("level") in ["WARNING", "WARN"]])
+        info_logs = len([log for log in all_matching_logs if log.get("level") == "INFO"])
+        critical_logs = len([log for log in all_matching_logs if log.get("level") == "CRITICAL"])
         
-        return serialized_logs
+        # Calculate recent errors (last hour)
+        one_hour_ago = datetime.utcnow() - timedelta(hours=1)
+        recent_errors = len([log for log in all_matching_logs if 
+                           log.get("level") == "ERROR" and 
+                           log.get("createdAt", datetime.utcnow()) > one_hour_ago])
+        
+        stats = {
+            "totalLogs": total_logs,
+            "errorLogs": error_logs,
+            "warningLogs": warning_logs,
+            "infoLogs": info_logs,
+            "criticalLogs": critical_logs,
+            "recentErrors": recent_errors
+        }
+        
+        pagination_info = {
+            "current_page": page,
+            "total_pages": total_pages,
+            "total_count": total_count,
+            "page_size": limit,
+            "has_next": page < total_pages,
+            "has_prev": page > 1,
+            "start_index": skip + 1 if total_count > 0 else 0,
+            "end_index": min(skip + limit, total_count)
+        }
+        
+        logger.info(f"App logs stats calculated: {stats}")
+        
+        return {
+            "logs": formatted_logs,
+            "stats": stats,
+            "pagination": pagination_info
+        }
         
     except Exception as e:
-        logger.error(f"ERROR: App logs error: {e}")
+        logger.error(f"Error fetching app logs: {e}")
         import traceback
         traceback.print_exc()
-        return []
+        
+        return {
+            "logs": [],
+            "stats": {
+                "totalLogs": 0,
+                "errorLogs": 0,
+                "warningLogs": 0,
+                "infoLogs": 0,
+                "criticalLogs": 0,
+                "recentErrors": 0
+            },
+            "pagination": {
+                "current_page": 1,
+                "total_pages": 0,
+                "total_count": 0,
+                "page_size": limit,
+                "has_next": False,
+                "has_prev": False,
+                "start_index": 0,
+                "end_index": 0
+            }
+        }
+
 
 
 # Network metrics endpoint
