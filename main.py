@@ -704,6 +704,35 @@ async def get_dashboard_stats(environment: Optional[str] = Query("All"), app_nam
             "error": str(e)
         }
     
+@app.get("/api/debug/attack-predictions")
+async def debug_attack_predictions():
+    try:
+        attack_predictions_col = db['attack_predictions']
+        
+        # Get total count
+        total_count = attack_predictions_col.count_documents({})
+        
+        # Get sample documents
+        sample_docs = list(attack_predictions_col.find({}).limit(3))
+        
+        # Get distinct values
+        environments = attack_predictions_col.distinct("environment")
+        server_ids = attack_predictions_col.distinct("server_id")
+        
+        # Check for DDoS predictions specifically
+        ddos_count = attack_predictions_col.count_documents({"ddos_prediction": {"$exists": True, "$ne": None}})
+        
+        return {
+            "total_documents": total_count,
+            "ddos_predictions_count": ddos_count,
+            "distinct_environments": environments,
+            "distinct_server_ids": server_ids,
+            "sample_documents": serialize_docs(sample_docs)
+        }
+    except Exception as e:
+        return {"error": str(e)}
+
+    
 @app.get("/api/performance_summary")
 async def get_performance_summary(environment: Optional[str] = Query("All"), app_name: Optional[str] = Query("All")):
     """Get concise AI-powered performance summary for the overview page"""
@@ -1229,6 +1258,66 @@ async def get_app_logs(
             }
         }
 
+@app.get("/api/ddos-activity")
+async def get_ddos_activity(
+    environment: Optional[str] = Query("All"),
+    app_name: Optional[str] = Query("All")
+):
+    """Get servers with potential DDoS activity from attack_predictions collection"""
+    try:
+        logger.info(f"Fetching DDoS activity for environment: {environment}, app: {app_name}")
+        
+        # Use the attack_predictions collection
+        attack_predictions_col = db['attack_predictions']
+        
+        # Build query for DDoS predictions
+        base_query = {}
+        
+        # Environment filter
+        if environment and environment != "All":
+            env_mapping = {
+                "Development": "Dev",
+                "Staging": "Stage", 
+                "Production": "Prod",
+                "QA": "QA"
+            }
+            db_env = env_mapping.get(environment, environment)
+            base_query['environment'] = db_env
+        
+        # Filter for documents that have DDoS predictions
+        base_query['ddos_prediction'] = {"$exists": True, "$ne": None}
+        
+        logger.info(f"DDoS activity query: {base_query}")
+        
+        # Get all DDoS predictions
+        ddos_predictions = list(attack_predictions_col.find(base_query))
+        
+        # Count unique servers with DDoS activity
+        unique_servers = set()
+        for prediction in ddos_predictions:
+            server_id = prediction.get('server_id')
+            if server_id:
+                unique_servers.add(server_id)
+        
+        logger.info(f"Found {len(unique_servers)} unique servers with DDoS activity")
+        
+        # Return simple data without ObjectId serialization issues
+        return {
+            "total_predictions": len(ddos_predictions),
+            "unique_servers": len(unique_servers),
+            "servers": list(unique_servers)
+            # Remove the "predictions" field that contains ObjectId
+        }
+        
+    except Exception as e:
+        logger.error(f"Error fetching DDoS activity: {e}")
+        import traceback
+        traceback.print_exc()
+        return {
+            "total_predictions": 0,
+            "unique_servers": 0,
+            "servers": []
+        }
 
 
 # Network metrics endpoint
