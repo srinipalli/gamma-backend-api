@@ -42,7 +42,7 @@ MONGO_URI = 'mongodb+srv://mvishaalgokul8:IMTXb7QXknOIgFaw@infrahealth.vdxwhfq.m
 DB_NAME = 'logs'
 
 # Gemini AI configuration
-GEMINI_API_KEY = "AIzaSyBBh6qma7uR8pJdBOEGHOu1HOTEsyb0Xks"
+GEMINI_API_KEY = "AIzaSyAKjWeYP_QxKUWMFlq78lI2-Pbc63L4onE   "
 genai.configure(api_key=GEMINI_API_KEY)
 model = genai.GenerativeModel('gemini-1.5-flash-latest')
 
